@@ -1,0 +1,47 @@
+# 02 - Video Source Preparation Log
+
+Timestamp: 2026-08-26 (UTC session)
+
+## Source
+- Title: File:Building construction Moira Close Broadwater Farm Haringey 2025 16.webm
+- Author/License: Acabashi, CC BY-SA 4.0
+- Commons page: https://commons.wikimedia.org/wiki/File:Building_construction_Moira_Close_Broadwater_Farm_Haringey_2025_16.webm
+- Direct URL: https://upload.wikimedia.org/wikipedia/commons/5/54/Building_construction_Moira_Close_Broadwater_Farm_Haringey_2025_16.webm
+- Downloaded to temp: C:\Users\ksama\AppData\Local\Temp\opencode\construction_video\source.webm
+  (HTTP 200 on first attempt, no 429 encountered; 169,159,761 bytes)
+- Source properties (ffprobe): 1920x1080, VP9 video + Opus audio, 30/1.001 fps nominal, duration 362.088 s
+
+## Inspection
+Extracted frames at t = 0, 30, 60, 90, 120, 150, 180, 210, 235, 240, 245, 255, 265, 270, 275, 300, 330 s and visually inspected.
+The video is a construction timelapse with camera zooms and crossfade transitions between scenes.
+Workers are visible in every sampled frame; clearest large-person windows were ~30-60 s (concrete pour)
+and ~235-270 s (formwork deck).
+
+## Chosen window
+- Start: 236 s, Duration: 34 s (236-270 s of source)
+- WHY: Static zoomed camera on a formwork deck where 2-4 workers continuously walk across the frame
+  carrying materials. Workers are large in frame. Hard-hat variety is excellent for helmet detection:
+  a worker with a dark/black hard hat (on phone) dominates 236-250 s; multiple workers with white hard
+  hats cross the scene 245-270 s (one carrying plywood sheets across the deck). The camera zooms out at
+  ~272 s (frame at 275 s is wide, workers small), so the clip ends at 270 s to avoid the zoom-out.
+  The preceding scene transition completes before 235 s, so 236 s starts cleanly inside the static shot.
+
+## ffmpeg command used
+ffmpeg -ss 236 -t 34 -i "C:\Users\ksama\AppData\Local\Temp\opencode\construction_video\source.webm" -vf "scale=1280:-2,fps=15" -c:v libx264 -preset veryfast -crf 26 -pix_fmt yuv420p -movflags +faststart -an "C:\Users\ksama\OneDrive\المستندات\projects\OpenCode\construction-helmet-detection\data\videos\site_clip.mp4"
+
+## Final file properties (ffprobe)
+- Path: C:\Users\ksama\OneDrive\المستندات\projects\OpenCode\construction-helmet-detection\data\videos\site_clip.mp4
+- Codec: h264 (yuv420p, faststart, no audio)
+- Resolution: 1280x720
+- Frame rate: 15 fps
+- Duration: 34.000000 s
+- Size: 9,459,979 bytes (~9.0 MB, under 15 MB target)
+
+## Verification
+Extracted frames from the FINAL mp4 at t=0.5 s and t=17 s and visually confirmed:
+- t=0.5 s: worker with dark hard hat + hi-vis vest, large in frame.
+- t=17 s: three workers - one with white hard hat walking across the deck, one with dark helmet,
+  one with white helmet carrying plywood. All clearly visible.
+
+## Cleanup
+Large source webm and all inspection frames deleted from temp directory after verification.

@@ -1,0 +1,8 @@
+=== 02_video_analytics.ipynb EXECUTION LOG ===
+timestamp : 2026-08-26 12:41:37
+notebook  : C:\Users\ksama\OneDrive\المستندات\projects\OpenCode\construction-helmet-detection\notebooks\02_video_analytics.ipynb
+status    : SUCCESS (all cells executed, outputs captured)
+duration  : 330.0s
+video     : data/videos/site_clip.mp4 (34 s, 1280x720 @ 15 fps, real construction site)
+api calls : model.track(persist=True) + solutions.ObjectCounter + solutions.Heatmap
+pipeline  : cv2.VideoCapture -> process -> cv2.VideoWriter (3 passes)
