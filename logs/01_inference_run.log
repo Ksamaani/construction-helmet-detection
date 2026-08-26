@@ -1,0 +1,7 @@
+=== 01_inference.ipynb EXECUTION LOG ===
+timestamp : 2026-08-26 11:31:58
+notebook  : C:\Users\ksama\OneDrive\المستندات\projects\OpenCode\construction-helmet-detection\notebooks\01_inference.ipynb
+status    : SUCCESS (all cells executed, outputs captured)
+duration  : 35.2s
+models    : yolo11n.pt (detect), yolo11n-seg.pt (segment), yolo11n-pose.pt (pose)
+api calls : model.predict() x13 (8 detect + 2 seg + 3 pose)
