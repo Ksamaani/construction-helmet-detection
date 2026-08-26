@@ -1,0 +1,415 @@
+"""Build notebooks/03_train_eval.ipynb — the READY-TO-RUN Colab GPU notebook
+(Deliverable 3: custom training, 15 pts + Deliverable 4: evaluation, 25 pts... see rubric numbering).
+
+The notebook is generated UNEXECUTED: it must be run on Google Colab with a GPU
+runtime, then downloaded back into notebooks/ WITH outputs retained.
+
+All API calls used here were smoke-tested locally on CPU (logs/03_smoke_test_local.log).
+"""
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+import nbformat
+
+NB_PATH = ROOT / "notebooks" / "03_train_eval.ipynb"
+
+
+def md(source):
+    return nbformat.v4.new_markdown_cell(source)
+
+
+def code(source):
+    return nbformat.v4.new_code_cell(source)
+
+
+cells = [
+    md(
+        "# 03 — Custom Training (Colab GPU) + Model Evaluation\n"
+        "\n"
+        "**Capstone deliverables** — *Custom Data & Training (15 pts)* and *Model Evaluation (25 pts)*.\n"
+        "\n"
+        "## How to run this notebook\n"
+        "1. Upload to Google Colab (or open from GitHub).\n"
+        "2. **Runtime → Change runtime type → T4 GPU** (training is not feasible on CPU).\n"
+        "3. **Runtime → Run all**. Expected total time ≈ **2–2.5 h** (Run A ≈ 45–60 min, Run B ≈ 60–75 min,\n"
+        "   evaluation ≈ 10 min).\n"
+        "4. When finished: **File → Download → Download .ipynb** (keeps outputs) and put it in the repo's\n"
+        "   `notebooks/` folder; download `best.pt` (cell at the bottom zips all artifacts).\n"
+        "\n"
+        "No Kaggle API key is required — the dataset is public and downloads anonymously via `kagglehub`."
+    ),
+    code(
+        "%pip install -q ultralytics kagglehub\n"
+        "\n"
+        "import torch, ultralytics\n"
+        "ultralytics.checks()\n"
+        "assert torch.cuda.is_available(), 'No GPU! Runtime -> Change runtime type -> T4 GPU'\n"
+        "print('GPU:', torch.cuda.get_device_name(0))"
+    ),
+    md(
+        "## 1 — The dataset: Construction Site Safety (Roboflow → Kaggle)\n"
+        "\n"
+        "| | |\n"
+        "|---|---|\n"
+        "| Source | Kaggle: [`snehilsanyal/construction-site-safety-image-dataset-roboflow`](https://www.kaggle.com/datasets/snehilsanyal/construction-site-safety-image-dataset-roboflow) (originally Roboflow Universe *Construction Site Safety*) |\n"
+        "| License | CC BY 4.0 |\n"
+        "| Size | 2,641 images (train 2,445 / valid 114 / test 82) — YOLO format |\n"
+        "| Classes | 10 PPE classes (below) |\n"
+        "\n"
+        "This is a **real public PPE dataset** (not coco8) with paired compliance classes:\n"
+        "`Hardhat` vs `NO-Hardhat`, `NO-Safety Vest` vs `Safety Vest` — exactly what a compliance\n"
+        "monitor needs, because a violation is a *positive detection* of `NO-*`, not the absence of a box."
+    ),
+    code(
+        "import kagglehub\n"
+        "\n"
+        "path = kagglehub.dataset_download('snehilsanyal/construction-site-safety-image-dataset-roboflow')\n"
+        "print('downloaded to:', path)\n"
+        "DATA_ROOT = Path(path) / 'css-data'\n"
+        "print('subdirs:', sorted(d.name for d in DATA_ROOT.iterdir() if d.is_dir()))"
+    ),
+    code(
+        "import matplotlib.pyplot as plt\n"
+        "import yaml\n"
+        "from collections import Counter\n"
+        "from pathlib import Path\n"
+        "\n"
+        "NAMES = {\n"
+        "    0: 'Hardhat', 1: 'Mask', 2: 'NO-Hardhat', 3: 'NO-Mask', 4: 'NO-Safety Vest',\n"
+        "    5: 'Person', 6: 'Safety Cone', 7: 'Safety Vest', 8: 'machinery', 9: 'vehicle',\n"
+        "}\n"
+        "\n"
+        "DATA_YAML = Path('/content/css_data.yaml')\n"
+        "DATA_YAML.write_text(yaml.safe_dump({\n"
+        "    'path': str(DATA_ROOT),\n"
+        "    'train': 'train/images',\n"
+        "    'val': 'valid/images',\n"
+        "    'test': 'test/images',\n"
+        "    'names': NAMES,\n"
+        "}))\n"
+        "print(DATA_YAML.read_text())\n"
+        "\n"
+        "for split in ('train', 'valid', 'test'):\n"
+        "    n = len(list((DATA_ROOT / split / 'images').glob('*')))\n"
+        "    print(f'{split}: {n} images')\n"
+        "\n"
+        "cnt = Counter()\n"
+        "for lf in (DATA_ROOT / 'train' / 'labels').glob('*.txt'):\n"
+        "    for line in lf.read_text().splitlines():\n"
+        "        if line.strip():\n"
+        "            cnt[int(line.split()[0])] += 1\n"
+        "pairs = sorted(cnt.items())\n"
+        "fig, ax = plt.subplots(figsize=(10, 4))\n"
+        "ax.bar([NAMES[c] for c, _ in pairs], [n for _, n in pairs], color='#2b8a3e')\n"
+        "ax.set_title('Train label distribution (class imbalance is expected and discussed later)')\n"
+        "ax.set_ylabel('instances')\n"
+        "plt.xticks(rotation=30, ha='right')\n"
+        "plt.tight_layout()\n"
+        "plt.show()"
+    ),
+    md(
+        "## 2 — Training Run A (baseline)\n"
+        "\n"
+        "Fine-tune `yolo11n.pt` (COCO-pretrained, transfer learning) with mostly default knobs:\n"
+        "\n"
+        "| knob | value |\n"
+        "|---|---|\n"
+        "| epochs | 20 |\n"
+        "| imgsz | 640 |\n"
+        "| batch | -1 (AutoBatch — fills T4 memory) |\n"
+        "| freeze | 0 (whole network trains) |\n"
+        "| augmentation | Ultralytics defaults (mosaic, hsv, flips…) |\n"
+        "| seed | 42 (reproducibility) |"
+    ),
+    code(
+        "from ultralytics import YOLO\n"
+        "\n"
+        "model_a = YOLO('yolo11n.pt')\n"
+        "res_a = model_a.train(\n"
+        "    data=str(DATA_YAML), epochs=20, imgsz=640, batch=-1, device=0,\n"
+        "    seed=42, plots=True, project='/content/runs', name='run_a_baseline',\n"
+        ")\n"
+        "RUN_A = Path(getattr(res_a, 'save_dir', '/content/runs/run_a_baseline'))\n"
+        "if not RUN_A.exists():\n"
+        "    RUN_A = sorted(Path('/content/runs').glob('**/weights/best.pt'))[-1].parents[1]\n"
+        "print('Run A saved in:', RUN_A)"
+    ),
+    code(
+        "import pandas as pd\n"
+        "\n"
+        "df_a = pd.read_csv(RUN_A / 'results.csv')\n"
+        "df_a.columns = [c.strip() for c in df_a.columns]\n"
+        "fig, axes = plt.subplots(1, 3, figsize=(18, 4))\n"
+        "axes[0].plot(df_a['epoch'], df_a['train/box_loss'], label='train'); axes[0].plot(df_a['epoch'], df_a['val/box_loss'], label='val')\n"
+        "axes[0].set_title('box_loss'); axes[0].legend()\n"
+        "axes[1].plot(df_a['epoch'], df_a['train/cls_loss'], label='train'); axes[1].plot(df_a['epoch'], df_a['val/cls_loss'], label='val')\n"
+        "axes[1].set_title('cls_loss'); axes[1].legend()\n"
+        "axes[2].plot(df_a['epoch'], df_a['metrics/mAP50(B)'], label='mAP50'); axes[2].plot(df_a['epoch'], df_a['metrics/mAP50-95(B)'], label='mAP50-95')\n"
+        "axes[2].set_title('mAP'); axes[2].legend()\n"
+        "plt.tight_layout()\n"
+        "plt.show()\n"
+        "df_a[['epoch', 'metrics/precision(B)', 'metrics/recall(B)', 'metrics/mAP50(B)', 'metrics/mAP50-95(B)']].tail(3)"
+    ),
+    md(
+        "## 3 — Training Run B (tuned: regularisation + backbone freezing)\n"
+        "\n"
+        "What we changed **and why**:\n"
+        "\n"
+        "| knob | A | B | why |\n"
+        "|---|---|---|---|\n"
+        "| epochs | 20 | **30** (patience **10**) | more headroom, early-stop if val stalls |\n"
+        "| freeze | 0 | **10** | freeze backbone — keep generic COCO features, train PPE-specific head |\n"
+        "| weight_decay | 0.0005 | **0.001** | stronger L2 against memorisation |\n"
+        "| hsv_v | default 0.4 | **0.5** | site lighting varies (shadows, glare) |\n"
+        "| degrees | 0 | **10** | cameras are never perfectly level |\n"
+        "| translate / scale | 0.1 / 0.5 | **0.2 / 0.7** | workers appear at many distances |\n"
+        "| close_mosaic | 10 | **10** | disable mosaic near the end for stable final epochs |"
+    ),
+    code(
+        "model_b = YOLO('yolo11n.pt')\n"
+        "res_b = model_b.train(\n"
+        "    data=str(DATA_YAML), epochs=30, imgsz=640, batch=-1, device=0,\n"
+        "    freeze=10, patience=10, weight_decay=0.001,\n"
+        "    hsv_v=0.5, degrees=10.0, translate=0.2, scale=0.7, fliplr=0.5,\n"
+        "    mosaic=1.0, close_mosaic=10,\n"
+        "    seed=42, plots=True, project='/content/runs', name='run_b_tuned',\n"
+        ")\n"
+        "RUN_B = Path(getattr(res_b, 'save_dir', '/content/runs/run_b_tuned'))\n"
+        "if not RUN_B.exists():\n"
+        "    RUN_B = sorted(Path('/content/runs').glob('**/weights/best.pt'))[-2].parents[1]\n"
+        "print('Run B saved in:', RUN_B)"
+    ),
+    code(
+        "df_b = pd.read_csv(RUN_B / 'results.csv')\n"
+        "df_b.columns = [c.strip() for c in df_b.columns]\n"
+        "fig, axes = plt.subplots(1, 2, figsize=(14, 4))\n"
+        "axes[0].plot(df_a['epoch'], df_a['metrics/mAP50(B)'], 'o-', label='A baseline')\n"
+        "axes[0].plot(df_b['epoch'], df_b['metrics/mAP50(B)'], 's-', label='B tuned')\n"
+        "axes[0].set_title('mAP50'); axes[0].legend()\n"
+        "axes[1].plot(df_a['epoch'], df_a['metrics/mAP50-95(B)'], 'o-', label='A baseline')\n"
+        "axes[1].plot(df_b['epoch'], df_b['metrics/mAP50-95(B)'], 's-', label='B tuned')\n"
+        "axes[1].set_title('mAP50-95'); axes[1].legend()\n"
+        "plt.tight_layout()\n"
+        "plt.show()\n"
+        "print('A best mAP50-95:', df_a['metrics/mAP50-95(B)'].max().round(4))\n"
+        "print('B best mAP50-95:', df_b['metrics/mAP50-95(B)'].max().round(4))"
+    ),
+    md(
+        "## 4 — Overfitting / underfitting readout\n"
+        "\n"
+        "Diagnosis rules (course Part 4):\n"
+        "- **Overfit**: train loss keeps dropping while val loss rises / val mAP stalls.\n"
+        "- **Underfit**: both losses stay high, mAP flat.\n"
+        "- **Healthy**: both losses converge low, val mAP climbs then plateaus."
+    ),
+    code(
+        "for tag, df in (('A', df_a), ('B', df_b)):\n"
+        "    tr = df['train/box_loss']; va = df['val/box_loss']\n"
+        "    last5_tr = tr.tail(5).mean(); first5_va = va.head(5).mean(); last5_va = va.tail(5).mean()\n"
+        "    trend = 'RISING (overfit signal)' if last5_va > first5_va else 'flat/falling (healthy)'\n"
+        "    print(f'Run {tag}: train box_loss last-5 mean = {last5_tr:.4f} | '\n"
+        "          f'val box_loss first-5 = {first5_va:.4f} -> last-5 = {last5_va:.4f} ({trend})')\n"
+        "    print(f'        best mAP50-95 = {df[\"metrics/mAP50-95(B)\"].max():.4f} at epoch {int(df.loc[df[\"metrics/mAP50-95(B)\"].idxmax(), \"epoch\"])}')"
+    ),
+    code(
+        "map_a = df_a['metrics/mAP50-95(B)'].max()\n"
+        "map_b = df_b['metrics/mAP50-95(B)'].max()\n"
+        "BEST_DIR, tag = (RUN_B, 'B') if map_b >= map_a else (RUN_A, 'A')\n"
+        "BEST_PT = BEST_DIR / 'weights' / 'best.pt'\n"
+        "get_ipython().system(f'cp {BEST_PT} /content/best.pt')\n"
+        "print(f'Selected Run {tag} (mAP50-95 {max(map_a, map_b):.4f}) -> /content/best.pt')"
+    ),
+    md(
+        "## 5 — Evaluation on the validation split (Deliverable: Model Evaluation)\n"
+        "\n"
+        "`model.val()` runs inference over `valid/images` (114 unseen site images, 697 instances),\n"
+        "matches predictions to ground truth with IoU, and reports COCO-style metrics.\n"
+        "\n"
+        "**Why these metrics matter for THIS use case:**\n"
+        "- A **false negative on `NO-Hardhat`** = an unhelmeted worker we fail to flag = a real\n"
+        "  safety incident walking past the camera. This is the costliest possible error.\n"
+        "- A **false positive** = a compliant worker flagged for inspection = wasted supervisor\n"
+        "  time, but nobody gets hurt.\n"
+        "→ The system must be tuned for **high recall on the `NO-*` classes**, accepting some\n"
+        "extra false alarms. The threshold study below quantifies that trade-off."
+    ),
+    code(
+        "best_model = YOLO('/content/best.pt')\n"
+        "metrics = best_model.val(data=str(DATA_YAML), split='val', iou=0.6, plots=True)\n"
+        "\n"
+        "print('=== headline metrics ===')\n"
+        "print(f\"mAP50      : {metrics.box.map50:.4f}\")\n"
+        "print(f\"mAP50-95   : {metrics.box.map:.4f}\")\n"
+        "print(f\"precision  : {metrics.box.mp:.4f}\")\n"
+        "print(f\"recall     : {metrics.box.mr:.4f}\")\n"
+        "\n"
+        "idx = list(metrics.box.ap_class_index)\n"
+        "rows = []\n"
+        "for pos, i in enumerate(idx):\n"
+        "    rows.append({\n"
+        "        'class': metrics.names[int(i)],\n"
+        "        'precision': round(float(metrics.box.p[pos]), 3),\n"
+        "        'recall': round(float(metrics.box.r[pos]), 3),\n"
+        "        'AP50': round(float(metrics.box.ap50[pos]), 3),\n"
+        "        'AP50-95': round(float(metrics.box.ap[pos]), 3),\n"
+        "    })\n"
+        "per_class = pd.DataFrame(rows).sort_values('class')\n"
+        "per_class"
+    ),
+    code(
+        "from IPython.display import Image as IPyImage, display\n"
+        "\n"
+        "save_dir = Path(metrics.save_dir)\n"
+        "print('val outputs in:', save_dir)\n"
+        "for png in ('confusion_matrix.png', 'confusion_matrix_normalized.png', 'PR_curve.png', 'F1_curve.png'):\n"
+        "    p = save_dir / png\n"
+        "    if p.exists():\n"
+        "        print(f'--- {png} ---')\n"
+        "        display(IPyImage(filename=str(p), width=560))"
+    ),
+    md(
+        "## 6 — Confidence-threshold study (choosing the operating point)\n"
+        "\n"
+        "The detector emits *scores*; **we** choose the cut-off. Lower conf → higher recall\n"
+        "(fewer missed violations) but lower precision (more false alarms). We sweep the\n"
+        "threshold and track **`NO-Hardhat` recall/precision** explicitly, because that class\n"
+        "carries the safety cost.\n"
+        "\n"
+        "**IoU choice:** metric mAP50-95 integrates IoU 0.50→0.95 (strict localization quality);\n"
+        "the confusion matrix above matches at IoU 0.60 — a pragmatic duplicate-suppression level\n"
+        "for axis-aligned PPE boxes."
+    ),
+    code(
+        "sweep = []\n"
+        "for conf in (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.75, 0.90):\n"
+        "    m = best_model.val(data=str(DATA_YAML), split='val', conf=conf, iou=0.6, plots=False, verbose=False)\n"
+        "    mp, mr = float(m.box.mp), float(m.box.mr)\n"
+        "    f1 = 2 * mp * mr / (mp + mr) if (mp + mr) else 0.0\n"
+        "    idx = list(m.box.ap_class_index)\n"
+        "    nh = m.names[2]\n"
+        "    pos = idx.index(2) if 2 in idx else None\n"
+        "    nh_p = float(m.box.p[pos]) if pos is not None else 0.0\n"
+        "    nh_r = float(m.box.r[pos]) if pos is not None else 0.0\n"
+        "    sweep.append({'conf': conf, 'P_all': round(mp, 3), 'R_all': round(mr, 3), 'F1_all': round(f1, 3),\n"
+        "                  'NO-Hardhat_P': round(nh_p, 3), 'NO-Hardhat_R': round(nh_r, 3)})\n"
+        "    print(f'conf={conf:.2f} done')\n"
+        "sweep_df = pd.DataFrame(sweep)\n"
+        "sweep_df"
+    ),
+    code(
+        "fig, axes = plt.subplots(1, 2, figsize=(14, 4))\n"
+        "axes[0].plot(sweep_df['conf'], sweep_df['P_all'], 'o-', label='precision (all)')\n"
+        "axes[0].plot(sweep_df['conf'], sweep_df['R_all'], 's-', label='recall (all)')\n"
+        "axes[0].plot(sweep_df['conf'], sweep_df['F1_all'], '^-', label='F1 (all)')\n"
+        "axes[0].set_xlabel('conf threshold'); axes[0].legend(); axes[0].set_title('All classes')\n"
+        "axes[1].plot(sweep_df['conf'], sweep_df['NO-Hardhat_P'], 'o-', label='NO-Hardhat precision')\n"
+        "axes[1].plot(sweep_df['conf'], sweep_df['NO-Hardhat_R'], 's-', label='NO-Hardhat recall')\n"
+        "axes[1].set_xlabel('conf threshold'); axes[1].legend(); axes[1].set_title('NO-Hardhat (the safety-critical class)')\n"
+        "plt.tight_layout()\n"
+        "plt.show()"
+    ),
+    md(
+        "## 7 — FN vs FP: the business cost of each operating point\n"
+        "\n"
+        "Course-style ROI model with **stated assumptions** (adjust to your site):\n"
+        "- ~40 unhelmeted-worker events per day reach the camera.\n"
+        "- **FN cost = 500 SAR** (unmitigated head-injury risk, regulatory exposure).\n"
+        "- **FP cost = 50 SAR** (supervisor walks over, checks, clears the worker).\n"
+        "\n"
+        "From per-class precision/recall at each threshold: `TP = R×40`, `FN = 40−TP`,\n"
+        "`FP = TP×(1/P − 1)` → **expected daily cost** per operating point."
+    ),
+    code(
+        "VIOLATIONS_PER_DAY = 40\n"
+        "COST_FN = 500\n"
+        "COST_FP = 50\n"
+        "\n"
+        "costs = []\n"
+        "for _, row in sweep_df.iterrows():\n"
+        "    R = row['NO-Hardhat_R']; P = row['NO-Hardhat_P']\n"
+        "    tp = R * VIOLATIONS_PER_DAY\n"
+        "    fn = VIOLATIONS_PER_DAY - tp\n"
+        "    fp = tp * (1 / P - 1) if P > 0 else float('inf')\n"
+        "    costs.append({'conf': row['conf'], 'TP': round(tp, 1), 'FN': round(fn, 1),\n"
+        "                  'FP': round(fp, 1), 'daily_cost_SAR': round(fn * COST_FN + fp * COST_FP)})\n"
+        "cost_df = pd.DataFrame(costs)\n"
+        "best_row = cost_df.loc[cost_df['daily_cost_SAR'].idxmin()]\n"
+        "print(cost_df.to_string(index=False))\n"
+        "print(f\"\\nLowest-cost operating point: conf={best_row['conf']} \"\n"
+        "      f\"({best_row['FN']} missed violations/day, {best_row['FP']} false alarms/day)\")"
+    ),
+    code(
+        "CHOSEN_CONF = float(best_row['conf'])\n"
+        "print('Chosen deployment confidence threshold:', CHOSEN_CONF)\n"
+        "final = best_model.val(data=str(DATA_YAML), split='val', conf=CHOSEN_CONF, iou=0.6, plots=False, verbose=False)\n"
+        "summary = {\n"
+        "    'chosen_conf': CHOSEN_CONF,\n",
+    ),
+]
+
+cells[-1] = code(
+    "import json\n"
+    "\n"
+    "CHOSEN_CONF = float(best_row['conf'])\n"
+    "print('Chosen deployment confidence threshold:', CHOSEN_CONF)\n"
+    "final = best_model.val(data=str(DATA_YAML), split='val', conf=CHOSEN_CONF, iou=0.6, plots=False, verbose=False)\n"
+    "summary = {\n"
+    "    'chosen_conf': CHOSEN_CONF,\n"
+    "    'run_a_best_map5095': round(float(map_a), 4),\n"
+    "    'run_b_best_map5095': round(float(map_b), 4),\n"
+    "    'selected_run': tag,\n"
+    "    'val_mAP50': round(float(metrics.box.map50), 4),\n"
+    "    'val_mAP50-95': round(float(metrics.box.map), 4),\n"
+    "    'val_precision': round(float(metrics.box.mp), 4),\n"
+    "    'val_recall': round(float(metrics.box.mr), 4),\n"
+    "    'expected_daily_cost_SAR': int(best_row['daily_cost_SAR']),\n"
+    "}\n"
+    "with open('/content/metrics.json', 'w') as fh:\n"
+    "    json.dump(summary, fh, indent=2)\n"
+    "print(json.dumps(summary, indent=2))"
+)
+cells.append(
+    md(
+        "## 8 — Package artifacts for the repo\n"
+        "\n"
+        "Run this last cell, then download **two files**: this executed notebook\n"
+        "(*File → Download → Download .ipynb*) and `capstone_artifacts.zip`.\n"
+        "Place them in the repo as `notebooks/03_train_eval.ipynb` and unzip into `models/` + `docs/`."
+    )
+)
+cells.append(
+    code(
+        "import shutil\n"
+        "import zipfile\n"
+        "\n"
+        "art = Path('/content/artifacts')\n"
+        "art.mkdir(exist_ok=True)\n"
+        "shutil.copy('/content/best.pt', art / 'best.pt')\n"
+        "shutil.copy('/content/metrics.json', art / 'metrics.json')\n"
+        "for src, dst_name in ((RUN_A / 'results.csv', 'run_a_results.csv'), (RUN_B / 'results.csv', 'run_b_results.csv'),\n"
+        "                      (RUN_A / 'args.yaml', 'run_a_args.yaml'), (RUN_B / 'args.yaml', 'run_b_args.yaml')):\n"
+        "    if Path(src).exists():\n"
+        "        shutil.copy(src, art / dst_name)\n"
+        "for png in save_dir.glob('*.png'):\n"
+        "    shutil.copy(png, art / f'val_{png.name}')\n"
+        "zpath = shutil.make_archive('/content/capstone_artifacts', 'zip', art)\n"
+        "print('artifacts zip:', zpath)\n"
+        "for f in sorted(art.iterdir()):\n"
+        "    print(f'  {f.name}  ({f.stat().st_size/1024:.0f} KB)')"
+    )
+)
+
+nb = nbformat.v4.new_notebook(cells=cells)
+nb.metadata["kernelspec"] = {"display_name": "Python 3", "language": "python", "name": "python3"}
+nb.metadata["language_info"] = {"name": "python"}
+nb.metadata["colab"] = {"provenance": [], "gpuType": "T4"}
+nb.metadata["accelerator"] = "GPU"
+
+NB_PATH.parent.mkdir(exist_ok=True)
+nbformat.write(nb, NB_PATH)
+print(f"wrote {NB_PATH} ({len(cells)} cells, unexecuted — run on Colab GPU)")
