@@ -112,7 +112,7 @@ cells = [
         "det_summary"
     ),
     code(
-        "showcase = ['site_01.jpg', 'site_03.jpg', 'site_05.jpg']\n"
+        "showcase = ['site_01.jpg', 'site_03.jpg', 'site_07.jpg']\n"
         "for name in showcase:\n"
         "    r = results_by_image[name]\n"
         "    out = OUT_DIR / f'01_detect_{name}'\n"
